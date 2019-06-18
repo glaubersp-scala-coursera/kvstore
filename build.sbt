@@ -5,7 +5,8 @@ scalaVersion := "2.11.12"
 scalacOptions ++= Seq(
   "-feature",
   "-deprecation",
-  "-encoding", "UTF-8",
+  "-encoding",
+  "UTF-8",
   "-unchecked",
   "-Xlint",
   "-Yno-adapted-args",
@@ -21,18 +22,19 @@ val akkaVersion = "2.5.21"
 val akkaHttpVersion = "10.1.8"
 
 libraryDependencies ++= Seq(
-  "com.typesafe.akka"        %% "akka-stream"              % akkaVersion,
-  "com.typesafe.akka"        %% "akka-stream-testkit"      % akkaVersion % Test,
-  "com.typesafe.akka"        %% "akka-stream-typed"        % akkaVersion,
-
+  "com.typesafe.akka" %% "akka-stream" % akkaVersion,
+  "com.typesafe.akka" %% "akka-stream-testkit" % akkaVersion % Test,
+  "com.typesafe.akka" %% "akka-stream-typed" % akkaVersion,
   // to be used slightly in followers example
-  "com.typesafe.akka"        %% "akka-actor-typed"         % akkaVersion,
-
+  "com.typesafe.akka" %% "akka-actor-typed" % akkaVersion,
   // Used by protocols assignment
-  "com.typesafe.akka"        %% "akka-actor-testkit-typed" % akkaVersion % Test,
-
-  "org.scalacheck"           %% "scalacheck"               % "1.13.5"    % Test,
-  "junit"                    % "junit"                     % "4.10"      % Test
+  "com.typesafe.akka" %% "akka-actor-testkit-typed" % akkaVersion % Test,
+  "org.scalacheck" %% "scalacheck" % "1.13.5" % Test,
+  "junit" % "junit" % "4.10" % Test,
+  // Test resources
+  "org.slf4j" % "slf4j-api" % "1.7.25" % Test,
+  "ch.qos.logback" % "logback-classic" % "1.2.3" % Test,
+  "com.typesafe.akka" %% "akka-slf4j" % akkaVersion % Test
 )
 
 courseId := "changeme"

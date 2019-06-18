@@ -1,6 +1,6 @@
 package kvstore
 
-import akka.actor.{Actor, ActorRef, Cancellable, PoisonPill, Props}
+import akka.actor.{Actor, ActorLogging, ActorRef, Cancellable, PoisonPill, Props}
 import akka.event.LoggingReceive
 import kvstore.Arbiter._
 
@@ -30,7 +30,7 @@ object Replica {
     Props(new Replica(arbiter, persistenceProps))
 }
 
-class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
+class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with ActorLogging {
 
   import Persistence._
   import Replica._
