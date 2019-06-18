@@ -24,8 +24,7 @@ object Replica {
 
   case class OperationFailed(id: Long) extends OperationReply
 
-  case class GetResult(key: String, valueOption: Option[String], id: Long)
-      extends OperationReply
+  case class GetResult(key: String, valueOption: Option[String], id: Long) extends OperationReply
 
   def props(arbiter: ActorRef, persistenceProps: Props): Props =
     Props(new Replica(arbiter, persistenceProps))
@@ -57,10 +56,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   // Keep track of Replicate Messages and Replicators
   var replicateMessageIdToReplicatorsMap = Map.empty[Long, Set[ActorRef]]
 
-  def trackReplicateMessageIdToReplicator(
-      replicateId: Long,
-      replicator: ActorRef
-  ): Unit = {
+  def trackReplicateMessageIdToReplicator(replicateId: Long, replicator: ActorRef): Unit = {
     var replicatorSet = Set.empty[ActorRef]
     if (replicateMessageIdToReplicatorsMap.get(replicateId).isDefined) {
       replicatorSet = replicateMessageIdToReplicatorsMap(replicateId)
@@ -92,10 +88,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   // Keep track of Persistence Messages and Persistencer
   var persistenceMessageIdToPersistencerMap = Map.empty[Long, ActorRef]
 
-  def trackPersistenceMessageIdToPersistencer(
-      msgId: Long,
-      persistencer: ActorRef
-  ): Unit = {
+  def trackPersistenceMessageIdToPersistencer(msgId: Long, persistencer: ActorRef): Unit = {
     persistenceMessageIdToPersistencerMap += (msgId -> persistencer)
   }
 
@@ -147,15 +140,14 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
         replicator ! Replicate(key, Some(value), id)
       })
       // Schedule to send OperationAck message
-      val cancellable: Cancellable =
-        context.system.scheduler.schedule(0 millisecond, 100 milliseconds) {
-          if (replicateMessageIdToReplicatorsMap.get(id).isEmpty) {
-            // All Replicate confirmed. Send OperationAck
-            replicateMessageIdToSenderMap(id) ! OperationAck(id)
-            replicationCancellables(id).cancel()
-            replicationCancellables -= id
-          }
+      val cancellable: Cancellable = context.system.scheduler.schedule(0 millisecond, 100 milliseconds) {
+        if (replicateMessageIdToReplicatorsMap.get(id).isEmpty) {
+          // All Replicate confirmed. Send OperationAck
+          replicateMessageIdToSenderMap(id) ! OperationAck(id)
+          replicationCancellables(id).cancel()
+          replicationCancellables -= id
         }
+      }
       // Keep track of generated cancellable to the Replicate messages
       replicationCancellables += (id -> cancellable)
 
@@ -175,15 +167,14 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
         // Persist change
 
         // Schedule to send OperationAck message
-        val cancellable: Cancellable = context.system.scheduler
-          .schedule(FiniteDuration(0, "ms"), FiniteDuration(100, "ms")) {
-            if (replicateMessageIdToReplicatorsMap.get(id).isEmpty) {
-              // All Replicate confirmed. Send OperationAck
-              replicateMessageIdToSenderMap(id) ! OperationAck(id)
-              replicationCancellables(id).cancel()
-              replicationCancellables -= id
-            }
+        val cancellable: Cancellable = context.system.scheduler.schedule(0 millisecond, 100 milliseconds) {
+          if (replicateMessageIdToReplicatorsMap.get(id).isEmpty) {
+            // All Replicate confirmed. Send OperationAck
+            replicateMessageIdToSenderMap(id) ! OperationAck(id)
+            replicationCancellables(id).cancel()
+            replicationCancellables -= id
           }
+        }
         // Keep track of generated cancellable to the Replicate messages
         replicationCancellables += (id -> cancellable)
       } else {
@@ -254,24 +245,16 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
             trackPersistenceMessageIdToSender(seq, sender())
             persistencer ! Persist(key, valueOption, seq)
             // Schedule to resend Persist message
-            val cancellable: Cancellable =
-              context.system.scheduler
-                .schedule(0 millisecond, 100 milliseconds) {
-                  if (persistenceMessageIdToPersistencerMap
-                        .get(seq)
-                        .isDefined) {
-                    // Persistence not confirmed. Resend Persist
-                    persistenceMessageIdToPersistencerMap(seq) ! Persist(
-                      key,
-                      valueOption,
-                      seq
-                    )
-                  } else {
-                    // Persistence already confirmed. Cancel resend.
-                    persistenceCancellables(seq).cancel()
-                    persistenceCancellables -= seq
-                  }
-                }
+            val cancellable: Cancellable = context.system.scheduler.schedule(0 millisecond, 100 milliseconds) {
+              if (persistenceMessageIdToPersistencerMap.get(seq).isDefined) {
+                // Persistence not confirmed. Resend Persist
+                persistenceMessageIdToPersistencerMap(seq) ! Persist(key, valueOption, seq)
+              } else {
+                // Persistence already confirmed. Cancel resend.
+                persistenceCancellables(seq).cancel()
+                persistenceCancellables -= seq
+              }
+            }
             persistenceCancellables += (seq -> cancellable)
 
             setExpectedSnapshotAckId(seq)
