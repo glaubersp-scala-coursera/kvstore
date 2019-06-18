@@ -47,8 +47,8 @@ class Replicator(val replica: ActorRef) extends Actor with ActorLogging {
       acks += (seq -> ((sender(), msg)))
 
       // Schedule to re-send Snapshot message to replica on 100ms intervals until confirmed
-      val cancellable: Cancellable = context.system.scheduler
-        .schedule(FiniteDuration(0, "ms"), FiniteDuration(100, "ms")) {
+      val cancellable: Cancellable =
+        context.system.scheduler.schedule(0 millisecond, 100 milliseconds) {
           if (acks.get(seq).nonEmpty) {
             // Unconfirmed. Resend!
             replica ! Snapshot(key, valueOption, seq)
