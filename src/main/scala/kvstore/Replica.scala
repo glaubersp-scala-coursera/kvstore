@@ -4,20 +4,26 @@ import akka.actor.{Actor, ActorRef, Cancellable, PoisonPill, Props}
 import akka.event.LoggingReceive
 import kvstore.Arbiter._
 
-import scala.concurrent.duration.FiniteDuration
-
 object Replica {
+
   sealed trait Operation {
     def key: String
+
     def id: Long
   }
+
   case class Insert(key: String, value: String, id: Long) extends Operation
+
   case class Remove(key: String, id: Long) extends Operation
+
   case class Get(key: String, id: Long) extends Operation
 
   sealed trait OperationReply
+
   case class OperationAck(id: Long) extends OperationReply
+
   case class OperationFailed(id: Long) extends OperationReply
+
   case class GetResult(key: String, valueOption: Option[String], id: Long)
       extends OperationReply
 
@@ -26,10 +32,16 @@ object Replica {
 }
 
 class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
+
+  import Persistence._
   import Replica._
   import Replicator._
+  import akka.actor.OneForOneStrategy
+  import akka.actor.SupervisorStrategy._
   import context.dispatcher
+
   import scala.concurrent.duration._
+  import scala.language.postfixOps
 
   /*
    * The contents of this actor is just a suggestion, you can implement it in any way you like.
@@ -41,8 +53,10 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   // the current set of replicators
   var replicators = Set.empty[ActorRef]
 
-  // Keep track of Replicate Messages
+  // ================  REPLICATION ===================
+  // Keep track of Replicate Messages and Replicators
   var replicateMessageIdToReplicatorsMap = Map.empty[Long, Set[ActorRef]]
+
   def trackReplicateMessageIdToReplicator(replicateId: Long,
                                           replicator: ActorRef): Unit = {
     var replicatorSet = Set.empty[ActorRef]
@@ -53,17 +67,45 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
     replicateMessageIdToReplicatorsMap += (replicateId -> replicatorSet)
   }
 
-  var messageIdToSenderMap = Map.empty[Long, ActorRef]
-  def trackMessageIdToSender(msgId: Long, sender: ActorRef): Unit = {
-    messageIdToSenderMap += (msgId -> sender)
+  // Keep track of Replicate messages and senders
+  var replicateMessageIdToSenderMap = Map.empty[Long, ActorRef]
+
+  def trackReplicateMessageIdToSender(msgId: Long, sender: ActorRef): Unit = {
+    replicateMessageIdToSenderMap += (msgId -> sender)
   }
 
   var replicationCancellables = Map.empty[Long, Cancellable]
+  // ================ END OF REPLICATION ===================
+
+  // ================ PERSISTENCE ===================
+  var persistenceCancellables = Map.empty[Long, Cancellable]
 
   // The Persistence actor
-  val persistence = context.actorOf(persistenceProps)
+  override val supervisorStrategy =
+    OneForOneStrategy(maxNrOfRetries = 10, withinTimeRange = 1 second) {
+      case _: Exception => Restart
+    }
+  val persistencer = context.actorOf(persistenceProps)
+
+  // Keep track of Persistence Messages and Persistencer
+  var persistenceMessageIdToPersistencerMap = Map.empty[Long, ActorRef]
+
+  def trackPersistenceMessageIdToPersistencer(msgId: Long,
+                                              persistencer: ActorRef): Unit = {
+    persistenceMessageIdToPersistencerMap += (msgId -> persistencer)
+  }
+
+  // Keep track of Persistence messages and senders
+  var persistenceMessageIdToSenderMap = Map.empty[Long, ActorRef]
+
+  def trackPersistenceMessageIdToSender(msgId: Long, sender: ActorRef): Unit = {
+    persistenceMessageIdToSenderMap += (msgId -> sender)
+  }
+
+  // ================ END OF PERSISTENCE ===================
 
   var _replicateIdCounter = 0L
+
   def nextReplicateId(): Long = {
     val ret = _replicateIdCounter
     _replicateIdCounter += 1
@@ -75,6 +117,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   def expectedSnapshotAckId(): Long = {
     _snapshotAckCounter
   }
+
   def setExpectedSnapshotAckId(lastAckId: Long): Unit = {
     _snapshotAckCounter = _snapshotAckCounter max (lastAckId + 1)
   }
@@ -92,7 +135,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
       // Persist change
 
       // Keep sender of message for Ack purpouse
-      trackMessageIdToSender(id, sender())
+      trackReplicateMessageIdToSender(id, sender())
 
       // Replicate to secondaries
       replicators.foreach(replicator => {
@@ -101,10 +144,10 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
       })
       // Schedule to send OperationAck message
       val cancellable: Cancellable = context.system.scheduler
-        .schedule(FiniteDuration(0, "ms"), FiniteDuration(100, "ms")) {
+        .schedule(0 millisecond, 100 milliseconds) {
           if (replicateMessageIdToReplicatorsMap.get(id).isEmpty) {
             // All Replicate confirmed. Send OperationAck
-            messageIdToSenderMap(id) ! OperationAck(id)
+            replicateMessageIdToSenderMap(id) ! OperationAck(id)
             replicationCancellables(id).cancel()
             replicationCancellables -= id
           }
@@ -116,8 +159,8 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
       if (kv.contains(key)) {
         kv -= key
 
-        // Keep sender of message for Ack purpouse
-        trackMessageIdToSender(id, sender())
+        // Keep sender of message for Ack purpose
+        trackReplicateMessageIdToSender(id, sender())
 
         // Replicate to secondaries
         replicators.foreach(replicator => {
@@ -132,7 +175,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
           .schedule(FiniteDuration(0, "ms"), FiniteDuration(100, "ms")) {
             if (replicateMessageIdToReplicatorsMap.get(id).isEmpty) {
               // All Replicate confirmed. Send OperationAck
-              messageIdToSenderMap(id) ! OperationAck(id)
+              replicateMessageIdToSenderMap(id) ! OperationAck(id)
               replicationCancellables(id).cancel()
               replicationCancellables -= id
             }
@@ -182,8 +225,8 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
           if (newSet.isEmpty) {
             replicateMessageIdToReplicatorsMap -= id
 
-            messageIdToSenderMap(id) ! OperationAck(id)
-            messageIdToSenderMap -= id
+            replicateMessageIdToSenderMap(id) ! OperationAck(id)
+            replicateMessageIdToSenderMap -= id
           } else {
             replicateMessageIdToReplicatorsMap += (id -> replicatorSet)
           }
@@ -200,11 +243,35 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
       if (seq == expectedSnapshotAckId()) {
         valueOption match {
           case Some(value) =>
+            // Save locally
             kv += (key -> value)
-            sender() ! SnapshotAck(key, seq)
+            // Persist
+            trackPersistenceMessageIdToPersistencer(seq, persistencer)
+            trackPersistenceMessageIdToSender(seq, sender())
+            persistencer ! Persist(key, valueOption, seq)
+            // Schedule to resend Persist message
+            val cancellable: Cancellable = context.system.scheduler
+              .schedule(0 millisecond, 100 milliseconds) {
+                if (persistenceMessageIdToPersistencerMap.get(seq).isDefined) {
+                  // Persistence not confirmed. Resend Persist
+                  persistenceMessageIdToPersistencerMap(seq) ! Persist(
+                    key,
+                    valueOption,
+                    seq)
+                } else {
+                  // Persistence already confirmed. Cancel resend.
+                  persistenceCancellables(seq).cancel()
+                  persistenceCancellables -= seq
+                }
+              }
+            persistenceCancellables += (seq -> cancellable)
+
             setExpectedSnapshotAckId(seq)
           case None =>
+            // Save locally
             kv -= key
+            // Persist
+
             sender() ! SnapshotAck(key, seq)
             setExpectedSnapshotAckId(seq)
         }
@@ -220,11 +287,22 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
           if (newSet.isEmpty) {
             replicateMessageIdToReplicatorsMap -= id
 
-            messageIdToSenderMap(id) ! OperationAck(id)
-            messageIdToSenderMap -= id
+            replicateMessageIdToSenderMap(id) ! OperationAck(id)
+            replicateMessageIdToSenderMap -= id
           } else {
             replicateMessageIdToReplicatorsMap += (id -> replicatorSet)
           }
+        }
+      }
+
+    case Persisted(key, id) =>
+      for ((tempId, persistencer) <- persistenceMessageIdToPersistencerMap) {
+        if (tempId == id) {
+
+          persistenceMessageIdToPersistencerMap -= id
+
+          persistenceMessageIdToSenderMap(id) ! SnapshotAck(key, id)
+          persistenceMessageIdToSenderMap -= id
         }
       }
   }
@@ -232,5 +310,4 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   // Connect to the Arbiter
   arbiter ! Join
 
-  // Create the persistence actor
 }
