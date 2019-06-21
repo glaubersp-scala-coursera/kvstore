@@ -1,6 +1,6 @@
 package kvstore
 
-import akka.actor.{Actor, ActorLogging, ActorRef, Cancellable, Props}
+import akka.actor.{Actor, ActorLogging, ActorRef, Cancellable, PoisonPill, Props}
 import akka.event.LoggingReceive
 
 import scala.language.postfixOps
@@ -38,7 +38,7 @@ class Replicator(val replica: ActorRef) extends Actor with ActorLogging {
     ret
   }
 
-  /* TODO Behavior for the Replicator. */
+  /* Behavior for the Replicator. */
   def receive: Receive = LoggingReceive {
     case msg @ Replicate(key, valueOption, id) =>
       val seq = nextSeq()
@@ -50,6 +50,7 @@ class Replicator(val replica: ActorRef) extends Actor with ActorLogging {
       val cancellable: Cancellable = context.system.scheduler.schedule(0 millisecond, 100 milliseconds) {
         if (acks.get(seq).nonEmpty) {
           // Unconfirmed. Resend!
+          log.debug(s"RE-SEND: $replica ! Snapshot($key, $valueOption, $seq)")
           replica ! Snapshot(key, valueOption, seq)
         } else {
           // Confirmed. Cancel corresponding schedulled message.
@@ -66,9 +67,17 @@ class Replicator(val replica: ActorRef) extends Actor with ActorLogging {
         acks -= seq
 
         // Confirm Replicate message
+        log.debug(s"SEND: $replicateSender ! Replicated($repKey, $repId)")
         replicateSender ! Replicated(repKey, repId)
       }
-
   }
-
+  override def postStop(): Unit = {
+    for ((id, (replicateSender, Replicate(repKey, repVal, repId))) <- acks) {
+      replicateSender ! Replicated(repKey, repId)
+    }
+    for ((id, cancellable) <- cancellables) {
+      cancellable.cancel()
+      cancellables -= id
+    }
+  }
 }
