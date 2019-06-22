@@ -65,18 +65,14 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   var replicateMessageIdToReplicatorsAndQuantityMap = Map.empty[Long, Map[ActorRef, Int]]
 
   def trackReplicateMessageIdToReplicator(msgId: Long, replicator: ActorRef): Unit = {
-    var replicatorToSentMessagesMap = Map.empty[ActorRef, Int]
-    if (replicateMessageIdToReplicatorsAndQuantityMap.get(msgId).isDefined) {
-      replicatorToSentMessagesMap = replicateMessageIdToReplicatorsAndQuantityMap(msgId)
-      var quantity = 0
-      if (replicatorToSentMessagesMap.get(replicator).isDefined) {
-        quantity = replicatorToSentMessagesMap(replicator)
-      }
-      replicatorToSentMessagesMap += (replicator -> (quantity + 1))
-    } else {
-      replicatorToSentMessagesMap += (replicator -> 1)
+    replicateMessageIdToReplicatorsAndQuantityMap.get(msgId) match {
+      case Some(replicatorToSentMessagesMap) =>
+        val quantity = 1 + replicatorToSentMessagesMap.getOrElse(replicator, 0)
+        replicateMessageIdToReplicatorsAndQuantityMap += (msgId ->
+          (replicatorToSentMessagesMap + (replicator -> quantity)))
+      case None =>
+        replicateMessageIdToReplicatorsAndQuantityMap += (msgId -> Map(replicator -> 1))
     }
-    replicateMessageIdToReplicatorsAndQuantityMap += (msgId -> replicatorToSentMessagesMap)
   }
 
   // Track Replicate message id to its sender
@@ -102,18 +98,14 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   var persistenceMessageIdToPersistencerMap = Map.empty[Long, Map[ActorRef, Int]]
 
   def trackPersistenceMessageIdToPersistencer(msgId: Long, persistencer: ActorRef): Unit = {
-    var persistencerToQuantityMap = Map.empty[ActorRef, Int]
-    if (persistenceMessageIdToPersistencerMap.get(msgId).isDefined) {
-      persistencerToQuantityMap = persistenceMessageIdToPersistencerMap(msgId)
-      var quantity = 0
-      if (persistencerToQuantityMap.get(persistencer).isDefined) {
-        quantity = persistencerToQuantityMap(persistencer)
-      }
-      persistencerToQuantityMap += (persistencer -> (quantity + 1))
-    } else {
-      persistencerToQuantityMap += (persistencer -> 1)
+    persistenceMessageIdToPersistencerMap.get(msgId) match {
+      case Some(persistencerToQuantityMap) =>
+        var quantity = 1 + persistencerToQuantityMap.getOrElse(persistencer, 0)
+        persistenceMessageIdToPersistencerMap += (msgId ->
+          (persistencerToQuantityMap + (persistencer -> quantity)))
+      case None =>
+        persistenceMessageIdToPersistencerMap += (msgId -> Map(persistencer -> 1))
     }
-    persistenceMessageIdToPersistencerMap += (msgId -> persistencerToQuantityMap)
   }
 
   // Track Persistence message id to sender
@@ -133,10 +125,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   var ackMessageIdToQuantityMap = Map.empty[Long, Int]
 
   def trackAckMessageIdToSender(msgId: Long): Unit = {
-    var quantity = 1
-    if (ackMessageIdToQuantityMap.get(msgId).isDefined) {
-      quantity += ackMessageIdToQuantityMap(msgId)
-    }
+    var quantity = 1 + ackMessageIdToQuantityMap.getOrElse(msgId, 0)
     ackMessageIdToQuantityMap += (msgId -> quantity)
   }
 
@@ -171,97 +160,88 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
         trackReplicateMessageIdToReplicator(id, replicator)
         log.debug(s"SEND: $replicator ! Replicate($key, Some($value), $id)")
         replicator ! Replicate(key, Some(value), id)
-
       })
 
-      // Schedule to resend Replicate messages
-      val cancellable: Cancellable = context.system.scheduler.schedule(100 millisecond, 100 milliseconds) {
-        if (replicateMessageIdToReplicatorsAndQuantityMap.get(id).isDefined) {
-          // Replicate may be not confirmed. Check and resend to each replicator.
-          val replicatorsAndQuantityMap = replicateMessageIdToReplicatorsAndQuantityMap(id)
-          for (replicator <- replicatorsAndQuantityMap.keySet) {
-            val times = replicatorsAndQuantityMap(replicator)
-            if (times < 10) {
-              trackReplicateMessageIdToReplicator(id, replicator)
-              log.debug(s"RE-SEND: $replicator ! Replicate($key, $Some(value), $id)")
-              replicator ! Replicate(key, Some(value), id)
-            } else {
-              // Generate OperationFailed message to the original sender
-              log.debug(s"FAIL-INSERT-REPLICATE: ${toBeAckedMessageIdToSenderMap(id)} ! OperationFailed($id)")
-              toBeAckedMessageIdToSenderMap(id) ! OperationFailed(id)
-            }
-          }
-        } else {
-          // Replicate already confirmed. Cancel resend.
-          log.debug(s"CANCEL: Replicate($key, $Some(value), $id)")
-          replicationCancellables(id).cancel()
-          replicationCancellables -= id
-        }
-      }
       // Keep track of generated cancellable to the Replicate messages
-      replicationCancellables += (id -> cancellable)
+      replicationCancellables += (id -> context.system.scheduler.schedule(100 millisecond, 100 milliseconds) {
+        replicateMessageIdToReplicatorsAndQuantityMap.get(id) match {
+          case Some(replicatorsAndQuantityMap) =>
+            for ((replicator, times) <- replicatorsAndQuantityMap) {
+              if (times < 10) {
+                trackReplicateMessageIdToReplicator(id, replicator)
+                log.debug(s"RE-SEND: $replicator ! Replicate($key, $Some(value), $id)")
+                replicator ! Replicate(key, Some(value), id)
+              } else {
+                // Generate OperationFailed message to the original sender
+                log.debug(s"FAIL-INSERT-REPLICATE: ${toBeAckedMessageIdToSenderMap(id)} ! OperationFailed($id)")
+                toBeAckedMessageIdToSenderMap(id) ! OperationFailed(id)
+              }
+            }
+          case None =>
+            // Replicate already confirmed. Cancel resend.
+            log.debug(s"CANCEL: Replicate($key, $Some(value), $id)")
+            replicationCancellables(id).cancel()
+            replicationCancellables -= id
+        }
+      })
 
       // Persist
       trackPersistenceMessageIdToPersistencer(id, persistencer)
       trackPersistenceMessageIdToSender(id, sender())
       log.debug(s"SEND: $persistencer ! Persist($key, Some($value), $id)")
       persistencer ! Persist(key, Some(value), id)
-      // Schedule to resend Persist message
-      val cancellablePersistence: Cancellable = context.system.scheduler.schedule(100 millisecond, 100 milliseconds) {
-        if (persistenceMessageIdToPersistencerMap.get(id).isDefined) {
-          val persistenceToQuantityMap = persistenceMessageIdToPersistencerMap(id)
-          for (actor <- persistenceToQuantityMap.keySet) {
-            val times = persistenceToQuantityMap(actor)
-            if (times < 10) {
-              // Persistence not confirmed. Resend Persist
-              trackPersistenceMessageIdToPersistencer(id, actor)
-              log.debug(s"RE-SEND: $actor ! Persist($key, Some($value), $id)")
-              actor ! Persist(key, Some(value), id)
-            } else {
-              // Actor Persistence should fail after 9 retries
-              log.debug(s"FAIL-INSERT-PERSIST: $actor ! Kill")
-              actor ! Kill
-              log.debug(s"FAIL-INSERT-PERSIST: ${persistenceMessageIdToSenderMap(id)} ! OperationFailed($id)")
-              persistenceMessageIdToSenderMap(id) ! OperationFailed(id)
+      persistenceCancellables += (id -> context.system.scheduler.schedule(100 millisecond, 100 milliseconds) {
+        persistenceMessageIdToPersistencerMap.get(id) match {
+          case Some(persistenceToQuantityMap) =>
+            for ((actor, times) <- persistenceToQuantityMap) {
+              if (times < 10) {
+                // Persistence not confirmed. Resend Persist
+                trackPersistenceMessageIdToPersistencer(id, actor)
+                log.debug(s"RE-SEND: $actor ! Persist($key, Some($value), $id)")
+                actor ! Persist(key, Some(value), id)
+              } else {
+                // Actor Persistence should fail after 9 retries
+                log.debug(s"FAIL-INSERT-PERSIST: $actor ! Kill")
+                actor ! Kill
+                log.debug(s"FAIL-INSERT-PERSIST: ${persistenceMessageIdToSenderMap(id)} ! OperationFailed($id)")
+                persistenceMessageIdToSenderMap(id) ! OperationFailed(id)
+              }
             }
-          }
-        } else {
-          // Persistence already confirmed. Cancel resend.
-          log.debug(s"CANCEL: Persist($key, Some($value), $id)")
-          persistenceCancellables(id).cancel()
-          persistenceCancellables -= id
+          case None =>
+            // Persistence already confirmed. Cancel resend.
+            log.debug(s"CANCEL: Persist($key, Some($value), $id)")
+            persistenceCancellables(id).cancel()
+            persistenceCancellables -= id
         }
-      }
-      persistenceCancellables += (id -> cancellablePersistence)
-
+      })
       // Schedule to send OperationAck message
       trackAckMessageIdToSender(id)
-      val ackCancellable: Cancellable = context.system.scheduler.schedule(100 millisecond, 100 milliseconds) {
-        if (ackMessageIdToQuantityMap.get(id).isDefined) {
-          if (ackMessageIdToQuantityMap(id) < 10) {
-            if (replicateMessageIdToReplicatorsAndQuantityMap.get(id).isDefined
-                || persistenceMessageIdToPersistencerMap.get(id).isDefined) {
-              trackAckMessageIdToSender(id)
+      ackCancellables += (id -> context.system.scheduler.schedule(100 millisecond, 100 milliseconds) {
+        ackMessageIdToQuantityMap.get(id) match {
+          case Some(times) =>
+            if (times < 10) {
+              if (replicateMessageIdToReplicatorsAndQuantityMap.get(id).isDefined
+                  || persistenceMessageIdToPersistencerMap.get(id).isDefined) {
+                trackAckMessageIdToSender(id)
+              } else {
+                toBeAckedMessageIdToSenderMap(id) ! OperationAck(id)
+                // Operation already confirmed. Cancel
+                log.debug(s"CANCEL: OperationAck($id)")
+                ackCancellables(id).cancel()
+                ackCancellables -= id
+              }
             } else {
-              toBeAckedMessageIdToSenderMap(id) ! OperationAck(id)
-              // Operation already confirmed. Cancel
-              log.debug(s"CANCEL: OperationAck($id)")
-              ackCancellables(id).cancel()
-              ackCancellables -= id
+              // Operation should fail after 9 retries
+              log.debug(s"FAIL-INSERT-ACK: ${toBeAckedMessageIdToSenderMap(id)} ! OperationFailed($id)")
+              toBeAckedMessageIdToSenderMap(id) ! OperationFailed(id)
             }
-          } else {
-            // Operation should fail after 9 retries
-            log.debug(s"FAIL-INSERT-ACK: ${toBeAckedMessageIdToSenderMap(id)} ! OperationFailed($id)")
-            toBeAckedMessageIdToSenderMap(id) ! OperationFailed(id)
-          }
-        } else {
-          // Operation already confirmed. Cancel
-          log.debug(s"CANCEL: OperationAck($id)")
-          ackCancellables(id).cancel()
-          ackCancellables -= id
+          case None =>
+            // Operation already confirmed. Cancel
+            log.debug(s"CANCEL: OperationAck($id)")
+            ackCancellables(id).cancel()
+            ackCancellables -= id
         }
-      }
-      ackCancellables += (id -> ackCancellable)
+      })
 
     case Remove(key, id) =>
       if (kv.contains(key)) {
@@ -278,46 +258,39 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
 
         })
 
-        // Schedule to resend Replicate messages
-        val cancellable: Cancellable = context.system.scheduler.schedule(100 millisecond, 100 milliseconds) {
-          if (replicateMessageIdToReplicatorsAndQuantityMap.get(id).isDefined) {
-            // Replicate may be not confirmed. Check and resend to each replicator.
-            val replicatorsAndQuantityMap = replicateMessageIdToReplicatorsAndQuantityMap(id)
-            for (replicator <- replicatorsAndQuantityMap.keySet) {
-              val times = replicatorsAndQuantityMap(replicator)
-              if (times < 10) {
-                trackReplicateMessageIdToReplicator(id, replicator)
-                log.debug(s"RE-SEND: $replicator ! Replicate($key, None, $id)")
-                replicator ! Replicate(key, None, id)
-              } else {
-                // Generate OperationFailed message to the original sender
-                log.debug(s"FAIL-REMOVE-REPLICATE: ${toBeAckedMessageIdToSenderMap(id)} ! OperationFailed($id)")
-                toBeAckedMessageIdToSenderMap(id) ! OperationFailed(id)
-              }
-            }
-          } else {
-            // Replicate already confirmed. Cancel resend.
-            log.debug(s"CANCEL: Replicate($key, None, $id)")
-            replicationCancellables(id).cancel()
-            replicationCancellables -= id
-          }
-        }
         // Keep track of generated cancellable to the Replicate messages
-        replicationCancellables += (id -> cancellable)
+        replicationCancellables += (id -> context.system.scheduler.schedule(100 millisecond, 100 milliseconds) {
+          replicateMessageIdToReplicatorsAndQuantityMap.get(id) match {
+            case Some(replicatorsAndQuantityMap) =>
+              for ((replicator, times) <- replicatorsAndQuantityMap) {
+                if (times < 10) {
+                  trackReplicateMessageIdToReplicator(id, replicator)
+                  log.debug(s"RE-SEND: $replicator ! Replicate($key, None, $id)")
+                  replicator ! Replicate(key, None, id)
+                } else {
+                  // Generate OperationFailed message to the original sender
+                  log.debug(s"FAIL-REMOVE-REPLICATE: ${toBeAckedMessageIdToSenderMap(id)} ! OperationFailed($id)")
+                  toBeAckedMessageIdToSenderMap(id) ! OperationFailed(id)
+                }
+              }
+            case None =>
+              // Replicate already confirmed. Cancel resend.
+              log.debug(s"CANCEL: Replicate($key, $Some(value), $id)")
+              replicationCancellables(id).cancel()
+              replicationCancellables -= id
+          }
+        })
 
         // Persist
         trackPersistenceMessageIdToPersistencer(id, persistencer)
         trackPersistenceMessageIdToSender(id, sender())
         log.debug(s"SEND: $persistencer ! Persist($key, None, $id)")
         persistencer ! Persist(key, None, id)
-        // Schedule to resend Persist message
-        val cancellablePersistence: Cancellable =
-          context.system.scheduler
-            .schedule(0 millisecond, 100 milliseconds) {
-              if (persistenceMessageIdToPersistencerMap.get(id).isDefined) {
-                val persistenceToQuantityMap = persistenceMessageIdToPersistencerMap(id)
-                for (actor <- persistenceToQuantityMap.keySet) {
-                  val times = persistenceToQuantityMap(actor)
+        persistenceCancellables += (id -> context.system.scheduler
+          .schedule(0 millisecond, 100 milliseconds) {
+            persistenceMessageIdToPersistencerMap.get(id) match {
+              case Some(persistenceToQuantityMap) =>
+                for ((actor, times) <- persistenceToQuantityMap) {
                   if (times < 10) {
                     // Persistence not confirmed. Resend Persist
                     trackPersistenceMessageIdToPersistencer(id, actor)
@@ -325,49 +298,48 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
                     actor ! Persist(key, None, id)
                   } else {
                     // Actor Persistence should fail after 9 retries
-                    log.debug(s"$persistencer ! Kill")
-                    persistencer ! Kill
+                    log.debug(s"FAIL-REMOVE-PERSIST: $actor ! Kill")
+                    actor ! Kill
                     log.debug(s"FAIL-REMOVE-PERSIST: ${persistenceMessageIdToSenderMap(id)} ! OperationFailed($id)")
                     persistenceMessageIdToSenderMap(id) ! OperationFailed(id)
                   }
                 }
-              } else {
+              case None =>
                 // Persistence already confirmed. Cancel resend.
                 log.debug(s"CANCEL: Persist($key, None, $id)")
                 persistenceCancellables(id).cancel()
                 persistenceCancellables -= id
-              }
             }
-        persistenceCancellables += (id -> cancellablePersistence)
+          })
 
         // Schedule to send OperationAck message
         trackAckMessageIdToSender(id)
-        val ackCancellable: Cancellable = context.system.scheduler.schedule(100 millisecond, 100 milliseconds) {
-          if (ackMessageIdToQuantityMap.get(id).isDefined) {
-            if (ackMessageIdToQuantityMap(id) < 10) {
-              if (replicateMessageIdToReplicatorsAndQuantityMap.get(id).isDefined
-                  || persistenceMessageIdToPersistencerMap.get(id).isDefined) {
-                trackAckMessageIdToSender(id)
+        ackCancellables += (id -> context.system.scheduler.schedule(100 millisecond, 100 milliseconds) {
+          ackMessageIdToQuantityMap.get(id) match {
+            case Some(times) =>
+              if (times < 10) {
+                if (replicateMessageIdToReplicatorsAndQuantityMap.get(id).isDefined
+                    || persistenceMessageIdToPersistencerMap.get(id).isDefined) {
+                  trackAckMessageIdToSender(id)
+                } else {
+                  toBeAckedMessageIdToSenderMap(id) ! OperationAck(id)
+                  // Operation already confirmed. Cancel
+                  log.debug(s"CANCEL: OperationAck($id)")
+                  ackCancellables(id).cancel()
+                  ackCancellables -= id
+                }
               } else {
-                toBeAckedMessageIdToSenderMap(id) ! OperationAck(id)
-                // Operation already confirmed. Cancel
-                log.debug(s"CANCEL: OperationAck($id)")
-                ackCancellables(id).cancel()
-                ackCancellables -= id
+                // Operation should fail after 9 retries
+                log.debug(s"FAIL-REMOVE-ACK: ${toBeAckedMessageIdToSenderMap(id)} ! OperationFailed($id)")
+                toBeAckedMessageIdToSenderMap(id) ! OperationFailed(id)
               }
-            } else {
-              // Operation should fail after 9 retries
-              log.debug(s"FAIL-REMOVE-ACK: ${toBeAckedMessageIdToSenderMap(id)} ! OperationFailed($id)")
-              toBeAckedMessageIdToSenderMap(id) ! OperationFailed(id)
-            }
-          } else {
-            // Operation already confirmed. Cancel
-            log.debug(s"CANCEL: OperationAck($id)")
-            ackCancellables(id).cancel()
-            ackCancellables -= id
+            case None =>
+              // Operation already confirmed. Cancel
+              log.debug(s"CANCEL: OperationAck($id)")
+              ackCancellables(id).cancel()
+              ackCancellables -= id
           }
-        }
-        ackCancellables += (id -> ackCancellable)
+        })
 
       } else {
         log.debug(s"SEND: ${sender()} ! OperationAck($id)3")
@@ -424,20 +396,23 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
       }
 
     case Replicated(key, id) =>
-      if (replicateMessageIdToReplicatorsAndQuantityMap.get(id).isDefined) {
-        var replicatorsAndQuantityMap = replicateMessageIdToReplicatorsAndQuantityMap(id)
-        replicatorsAndQuantityMap -= sender()
-        if (replicatorsAndQuantityMap.isEmpty) {
-          replicateMessageIdToReplicatorsAndQuantityMap -= id
-        } else {
-          replicateMessageIdToReplicatorsAndQuantityMap += (id -> replicatorsAndQuantityMap)
-        }
+      replicateMessageIdToReplicatorsAndQuantityMap.get(id) match {
+        case Some(replicatorsAndQuantityMap) =>
+          val newMap = replicatorsAndQuantityMap - sender()
+          if (newMap.isEmpty) {
+            replicateMessageIdToReplicatorsAndQuantityMap -= id
+          } else {
+            replicateMessageIdToReplicatorsAndQuantityMap += (id -> newMap)
+          }
+        case None =>
       }
 
     case Persisted(key, id) =>
-      if (persistenceMessageIdToPersistencerMap.get(id).isDefined) {
-        persistenceMessageIdToPersistencerMap -= id
-        persistenceMessageIdToSenderMap -= id
+      persistenceMessageIdToPersistencerMap.get(id) match {
+        case Some(_) =>
+          persistenceMessageIdToPersistencerMap -= id
+          persistenceMessageIdToSenderMap -= id
+        case None =>
       }
   }
 
@@ -456,39 +431,63 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
             trackPersistenceMessageIdToPersistencer(seq, persistencer)
             trackPersistenceMessageIdToSender(seq, sender())
             persistencer ! Persist(key, valueOption, seq)
-            // Schedule to resend Persist message
-            val cancellable: Cancellable = context.system.scheduler.schedule(100 millisecond, 100 milliseconds) {
-              if (persistenceMessageIdToPersistencerMap.get(seq).isDefined) {
-                val persistenceToQuantityMap = persistenceMessageIdToPersistencerMap(seq)
-                for (actor <- persistenceToQuantityMap.keySet) {
-                  val times = persistenceToQuantityMap(actor)
-                  if (times < 10) {
-                    // Persistence not confirmed. Resend Persist
-                    trackPersistenceMessageIdToPersistencer(seq, actor)
-                    log.debug(s"RE-SEND: $actor ! Persist($key, $valueOption, $seq)")
-                    actor ! Persist(key, valueOption, seq)
-                  } else {
-                    // Actor Persistence should fail after 9 retries
-                    log.debug(s"$actor ! Kill")
-                    actor ! Kill
+            persistenceCancellables += (seq -> context.system.scheduler.schedule(100 millisecond, 100 milliseconds) {
+              persistenceMessageIdToPersistencerMap.get(seq) match {
+                case Some(persistenceToQuantityMap) =>
+                  for (actor <- persistenceToQuantityMap.keySet) {
+                    val times = persistenceToQuantityMap(actor)
+                    if (times < 10) {
+                      // Persistence not confirmed. Resend Persist
+                      trackPersistenceMessageIdToPersistencer(seq, actor)
+                      log.debug(s"RE-SEND: $actor ! Persist($key, $valueOption, $seq)")
+                      actor ! Persist(key, valueOption, seq)
+                    } else {
+                      // Actor Persistence should fail after 9 retries
+                      log.debug(s"$actor ! Kill")
+                      actor ! Kill
+                    }
                   }
-                }
-              } else {
-                // Persistence already confirmed. Cancel resend.
-                persistenceCancellables(seq).cancel()
-                log.debug(s"Canceled replication of message Persist($key, $valueOption, $seq)")
-                persistenceCancellables -= seq
+                case None =>
+                  // Persistence already confirmed. Cancel resend.
+                  persistenceCancellables(seq).cancel()
+                  log.debug(s"Canceled replication of message Persist($key, $valueOption, $seq)")
+                  persistenceCancellables -= seq
               }
-            }
-            persistenceCancellables += (seq -> cancellable)
+            })
 
             setExpectedSnapshotAckId(seq)
+
           case None =>
             // Save locally
             kv -= key
             // Persist
+            trackPersistenceMessageIdToPersistencer(seq, persistencer)
+            trackPersistenceMessageIdToSender(seq, sender())
+            persistencer ! Persist(key, valueOption, seq)
+            persistenceCancellables += (seq -> context.system.scheduler.schedule(100 millisecond, 100 milliseconds) {
+              persistenceMessageIdToPersistencerMap.get(seq) match {
+                case Some(persistenceToQuantityMap) =>
+                  for (actor <- persistenceToQuantityMap.keySet) {
+                    val times = persistenceToQuantityMap(actor)
+                    if (times < 10) {
+                      // Persistence not confirmed. Resend Persist
+                      trackPersistenceMessageIdToPersistencer(seq, actor)
+                      log.debug(s"RE-SEND: $actor ! Persist($key, $valueOption, $seq)")
+                      actor ! Persist(key, valueOption, seq)
+                    } else {
+                      // Actor Persistence should fail after 9 retries
+                      log.debug(s"$actor ! Kill")
+                      actor ! Kill
+                    }
+                  }
+                case None =>
+                  // Persistence already confirmed. Cancel resend.
+                  persistenceCancellables(seq).cancel()
+                  log.debug(s"Canceled replication of message Persist($key, $valueOption, $seq)")
+                  persistenceCancellables -= seq
+              }
+            })
 
-            sender() ! SnapshotAck(key, seq)
             setExpectedSnapshotAckId(seq)
         }
       } else if (seq < expectedSnapshotAckId()) {
@@ -497,26 +496,27 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
       }
 
     case Replicated(key, id) =>
-      for ((tempId, replicatorSet) <- replicateMessageIdToReplicatorsAndQuantityMap) {
-        if (tempId == id) {
-          val newSet = replicatorSet - sender()
-          if (newSet.isEmpty) {
+      replicateMessageIdToReplicatorsAndQuantityMap.get(id) match {
+        case Some(replicatorsAndQuantityMap) =>
+          val newMap = replicatorsAndQuantityMap - sender()
+          if (newMap.isEmpty) {
             replicateMessageIdToReplicatorsAndQuantityMap -= id
-
             toBeAckedMessageIdToSenderMap(id) ! OperationAck(id)
             toBeAckedMessageIdToSenderMap -= id
           } else {
-            replicateMessageIdToReplicatorsAndQuantityMap += (id -> newSet)
+            replicateMessageIdToReplicatorsAndQuantityMap += (id -> newMap)
           }
-        }
+        case None =>
       }
 
     case Persisted(key, id) =>
-      if (persistenceMessageIdToPersistencerMap.get(id).isDefined) {
-        persistenceMessageIdToPersistencerMap -= id
-        log.debug(s"SEND: ${persistenceMessageIdToSenderMap(id)} ! SnapshotAck(%key, %id)")
-        persistenceMessageIdToSenderMap(id) ! SnapshotAck(key, id)
-        persistenceMessageIdToSenderMap -= id
+      persistenceMessageIdToPersistencerMap.get(id) match {
+        case Some(_) =>
+          persistenceMessageIdToPersistencerMap -= id
+          log.debug(s"SEND: ${persistenceMessageIdToSenderMap(id)} ! SnapshotAck(%key, %id)")
+          persistenceMessageIdToSenderMap(id) ! SnapshotAck(key, id)
+          persistenceMessageIdToSenderMap -= id
+        case None =>
       }
   }
 
